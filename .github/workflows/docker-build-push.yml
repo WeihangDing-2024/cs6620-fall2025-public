@@ -10,7 +10,7 @@ env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/cs6620-app
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,3 +56,49 @@ jobs:
             build.workflow=${{ github.workflow }}
             build.run_id=${{ github.run_id }}
             build.run_number=${{ github.run_number }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      # Configure AWS credentials using GitHub secrets
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Deploy the Docker container to EC2 instance via AWS SSM
+      - name: Deploy to EC2 via SSM
+        id: ssm-deploy
+        run: |
+          aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy cs6620-app Docker container from GitHub Actions" \
+            --parameters 'commands=[
+              "echo Pulling latest Docker image...",
+              "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/cs6620-app:latest",
+              "echo Stopping existing container...",
+              "docker stop cs6620-app || true",
+              "echo Removing old container...",
+              "docker rm cs6620-app || true",
+              "echo Starting new container...",
+              "docker run -d --name cs6620-app -p 80:5000 --restart unless-stopped ${{ secrets.DOCKERHUB_USERNAME }}/cs6620-app:latest",
+              "echo Deployment complete!"
+            ]' \
+            --output json > ssm-output.json
+          cat ssm-output.json
+          echo "command-id=$(cat ssm-output.json | jq -r '.Command.CommandId')" >> $GITHUB_OUTPUT
+
+      # Verify deployment was sent successfully
+      - name: Verify deployment command sent
+        run: |
+          COMMAND_ID="${{ steps.ssm-deploy.outputs.command-id }}"
+          echo "Deployment command sent successfully!"
+          echo "Command ID: $COMMAND_ID"
+          echo "You can check the execution status in AWS Systems Manager Run Command console"
+          echo "Or use: aws ssm get-command-invocation --command-id $COMMAND_ID --instance-id ${{ secrets.EC2_INSTANCE_ID }}"
